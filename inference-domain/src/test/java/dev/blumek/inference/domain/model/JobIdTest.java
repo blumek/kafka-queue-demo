@@ -9,37 +9,58 @@ import java.util.stream.Stream;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
-import static org.assertj.core.api.Assertions.assertThatNullPointerException;
+import static org.assertj.core.api.Assertions.catchThrowable;
 
 class JobIdTest {
+    private static final int GENERATED_IDS = 1_000;
 
     @Test
     void keepsGivenValue() {
-        assertThat(new JobId("job-42").value()).isEqualTo("job-42");
+        final var givenValue = givenValue();
+
+        final var actualJobId = new JobId(givenValue);
+
+        assertThat(actualJobId.value()).isEqualTo(givenValue);
+    }
+
+    private String givenValue() {
+        return "job-42";
     }
 
     @Test
     void rejectsNull() {
-        assertThatNullPointerException().isThrownBy(() -> new JobId(null));
+        final var actualThrown = catchThrowable(() -> new JobId(null));
+
+        assertThat(actualThrown).isInstanceOf(NullPointerException.class);
     }
 
     @Test
     void equalsByValue() {
-        assertThat(new JobId("job-42")).isEqualTo(new JobId("job-42"));
-        assertThat(new JobId("job-42")).isNotEqualTo(new JobId("job-43"));
+        final var givenValue = givenValue();
+
+        final var actualJobId = new JobId(givenValue);
+
+        assertThat(actualJobId).isEqualTo(new JobId(givenValue));
+        assertThat(actualJobId).isNotEqualTo(new JobId(givenOtherValue()));
+    }
+
+    private String givenOtherValue() {
+        return "job-43";
     }
 
     @Test
     void newIdIsAUuid() {
-        assertThatCode(() -> UUID.fromString(JobId.newId().value())).doesNotThrowAnyException();
+        final var actualJobId = JobId.newId();
+
+        assertThatCode(() -> UUID.fromString(actualJobId.value())).doesNotThrowAnyException();
     }
 
     @Test
     void newIdIsUniquePerCall() {
-        Set<JobId> ids = Stream.generate(JobId::newId)
-                .limit(1_000)
+        final var actualIds = Stream.generate(JobId::newId)
+                .limit(GENERATED_IDS)
                 .collect(HashSet::new, Set::add, Set::addAll);
 
-        assertThat(ids).hasSize(1_000);
+        assertThat(actualIds).hasSize(GENERATED_IDS);
     }
 }

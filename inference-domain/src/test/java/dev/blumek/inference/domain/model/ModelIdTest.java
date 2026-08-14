@@ -6,15 +6,16 @@ import org.junit.jupiter.params.provider.EmptySource;
 import org.junit.jupiter.params.provider.ValueSource;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatIllegalArgumentException;
-import static org.assertj.core.api.Assertions.assertThatNullPointerException;
+import static org.assertj.core.api.Assertions.catchThrowable;
 
 class ModelIdTest {
 
     @ParameterizedTest
     @ValueSource(strings = {"llama3", "l", "0", "llama-3.1_8b", "llama3:8b", "a.b-c_d:1.0-rc_2"})
-    void acceptsNameWithOptionalTag(String value) {
-        assertThat(new ModelId(value).value()).isEqualTo(value);
+    void acceptsNameWithOptionalTag(final String givenValue) {
+        final var actualModelId = new ModelId(givenValue);
+
+        assertThat(actualModelId.value()).isEqualTo(givenValue);
     }
 
     @ParameterizedTest
@@ -32,19 +33,29 @@ class ModelIdTest {
             " llama3",
             "llama3\n"
     })
-    void rejectsIdOutsideAllowedShape(String value) {
-        assertThatIllegalArgumentException().isThrownBy(() -> new ModelId(value));
+    void rejectsIdOutsideAllowedShape(final String givenValue) {
+        final var actualThrown = catchThrowable(() -> new ModelId(givenValue));
+
+        assertThat(actualThrown).isInstanceOf(IllegalArgumentException.class);
     }
 
     @Test
     void rejectsNull() {
-        assertThatNullPointerException().isThrownBy(() -> new ModelId(null));
+        final var actualThrown = catchThrowable(() -> new ModelId(null));
+
+        assertThat(actualThrown).isInstanceOf(NullPointerException.class);
     }
 
     @Test
     void reportsOffendingValue() {
-        assertThatIllegalArgumentException()
-                .isThrownBy(() -> new ModelId("Llama3"))
-                .withMessageContaining("Llama3");
+        final var givenInvalidValue = givenInvalidValue();
+
+        final var actualThrown = catchThrowable(() -> new ModelId(givenInvalidValue));
+
+        assertThat(actualThrown).hasMessageContaining(givenInvalidValue);
+    }
+
+    private String givenInvalidValue() {
+        return "Llama3";
     }
 }
