@@ -172,16 +172,6 @@ class KafkaJobPublisherTest {
     }
 
     @Test
-    void rejectsANullTemplate() {
-        assertThatNullPointerException().isThrownBy(() -> new KafkaJobPublisher(null, RETRY_AFTER));
-    }
-
-    @Test
-    void rejectsANullRetryAfter() {
-        assertThatNullPointerException().isThrownBy(() -> new KafkaJobPublisher(template, null));
-    }
-
-    @Test
     void rejectsANullRequest() {
         assertThatNullPointerException().isThrownBy(() -> publisher.publish(null));
     }

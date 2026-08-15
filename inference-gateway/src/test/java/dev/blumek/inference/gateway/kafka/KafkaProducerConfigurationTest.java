@@ -74,11 +74,8 @@ class KafkaProducerConfigurationTest {
     void buildsAConfigurationTheProducerAccepts() {
         final var actualConfiguration = whenTheProducerIsConfigured();
 
-        assertThatNoException().isThrownBy(() -> {
-            try (final var ignored = new KafkaProducer<>(actualConfiguration, new StringSerializer(), new StringSerializer())) {
-                // constructing the producer is the assertion: it validates the config without contacting a broker
-            }
-        });
+        assertThatNoException().isThrownBy(() ->
+                new KafkaProducer<>(actualConfiguration, new StringSerializer(), new StringSerializer()).close());
     }
 
     @Test

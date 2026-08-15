@@ -141,19 +141,7 @@ class KafkaHealthIndicatorTest {
     }
 
     @Test
-    void rejectsANullAdmin() {
-        assertThatNullPointerException()
-                .isThrownBy(() -> new KafkaHealthIndicator(null, Set.of(REQUIRED_TOPIC), TIMEOUT));
-    }
-
-    @Test
     void rejectsNullRequiredTopics() {
         assertThatNullPointerException().isThrownBy(() -> new KafkaHealthIndicator(admin, null, TIMEOUT));
-    }
-
-    @Test
-    void rejectsANullTimeout() {
-        assertThatNullPointerException()
-                .isThrownBy(() -> new KafkaHealthIndicator(admin, Set.of(REQUIRED_TOPIC), null));
     }
 }

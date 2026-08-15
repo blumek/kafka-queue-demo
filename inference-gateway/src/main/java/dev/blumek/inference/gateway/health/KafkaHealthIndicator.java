@@ -4,7 +4,6 @@ import org.apache.kafka.clients.admin.Admin;
 import org.apache.kafka.clients.admin.DescribeClusterOptions;
 import org.apache.kafka.clients.admin.ListTopicsOptions;
 import org.apache.kafka.common.KafkaFuture;
-import org.jspecify.annotations.NonNull;
 import org.springframework.boot.health.contributor.AbstractHealthIndicator;
 import org.springframework.boot.health.contributor.Health;
 
@@ -14,8 +13,6 @@ import java.util.Set;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 
-import static java.util.Objects.requireNonNull;
-
 class KafkaHealthIndicator extends AbstractHealthIndicator {
     private static final Duration AWAIT_GRACE = Duration.ofMillis(500);
 
@@ -24,9 +21,9 @@ class KafkaHealthIndicator extends AbstractHealthIndicator {
     private final Duration timeout;
 
     KafkaHealthIndicator(final Admin admin, final Set<String> requiredTopics, final Duration timeout) {
-        this.admin = requireNonNull(admin);
-        this.requiredTopics = Set.copyOf(requireNonNull(requiredTopics));
-        this.timeout = requireNonNull(timeout);
+        this.admin = admin;
+        this.requiredTopics = Set.copyOf(requiredTopics);
+        this.timeout = timeout;
     }
 
     @Override
@@ -51,11 +48,11 @@ class KafkaHealthIndicator extends AbstractHealthIndicator {
     private <T> T await(final KafkaFuture<T> future) throws Exception {
         try {
             return future.get(timeout.plus(AWAIT_GRACE).toMillis(), TimeUnit.MILLISECONDS);
-        } catch (final InterruptedException e) {
+        } catch (final InterruptedException exception) {
             Thread.currentThread().interrupt();
-            throw e;
-        } catch (final ExecutionException e) {
-            throw e.getCause() instanceof Exception cause ? cause : e;
+            throw exception;
+        } catch (final ExecutionException exception) {
+            throw exception.getCause() instanceof Exception cause ? cause : exception;
         }
     }
 

@@ -4,13 +4,11 @@ import org.apache.kafka.common.errors.SerializationException;
 import org.apache.kafka.common.serialization.Serializer;
 import tools.jackson.core.JacksonException;
 
-import static java.util.Objects.requireNonNull;
-
 final class JacksonSerializer<T> implements Serializer<T> {
     private final Class<T> type;
 
     JacksonSerializer(final Class<T> type) {
-        this.type = requireNonNull(type);
+        this.type = type;
     }
 
     @Override
