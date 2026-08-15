@@ -4,10 +4,12 @@ import org.apache.kafka.clients.admin.Admin;
 import org.apache.kafka.clients.admin.DescribeClusterOptions;
 import org.apache.kafka.clients.admin.ListTopicsOptions;
 import org.apache.kafka.common.KafkaFuture;
+import org.jspecify.annotations.NonNull;
 import org.springframework.boot.health.contributor.AbstractHealthIndicator;
 import org.springframework.boot.health.contributor.Health;
 
 import java.time.Duration;
+import java.util.List;
 import java.util.Set;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
@@ -36,7 +38,7 @@ class KafkaHealthIndicator extends AbstractHealthIndicator {
         final var clusterId = await(cluster.clusterId());
         final var nodes = await(cluster.nodes());
         final var present = await(topics.names());
-        final var missing = requiredTopics.stream().filter(topic -> !present.contains(topic)).sorted().toList();
+        final var missing = missingTopics(present);
 
         builder.withDetail("clusterId", clusterId).withDetail("nodes", nodes.size());
         if (missing.isEmpty()) {
@@ -55,5 +57,12 @@ class KafkaHealthIndicator extends AbstractHealthIndicator {
         } catch (final ExecutionException e) {
             throw e.getCause() instanceof Exception cause ? cause : e;
         }
+    }
+
+    private List<String> missingTopics(final Set<String> present) {
+        return requiredTopics.stream()
+                .filter(topic -> !present.contains(topic))
+                .sorted()
+                .toList();
     }
 }
