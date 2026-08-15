@@ -11,12 +11,14 @@ import org.springframework.test.web.servlet.assertj.MvcTestResult;
 
 import java.net.URI;
 import java.time.Duration;
+import java.util.List;
 import java.util.concurrent.CompletableFuture;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 class JobControllerTest {
@@ -28,7 +30,8 @@ class JobControllerTest {
 
     private final JobSubmissionService submissions = mock(JobSubmissionService.class);
 
-    private final MockMvcTester mvc = MockMvcTester.of(new JobController(submissions));
+    private final MockMvcTester mvc = MockMvcTester.of(List.of(new JobController(submissions)),
+            builder -> builder.setControllerAdvice(new ApiExceptionHandler()).build());
 
     @Test
     void answersAnAcceptedSubmissionWithTwoHundredAndTwo() {
@@ -89,7 +92,42 @@ class JobControllerTest {
     void doesNotLeakTheRejectionReasonToTheClient() {
         givenTheSubmissionIs(new PublishOutcome.Rejected("RecordTooLargeException"));
 
-        assertThat(whenAJobIsSubmitted()).body().isEmpty();
+        assertThat(whenAJobIsSubmitted()).bodyText().doesNotContain("RecordTooLargeException");
+    }
+
+    @Test
+    void describesAnUnavailableQueueAsAProblemDocument() {
+        givenTheSubmissionIs(new PublishOutcome.Unavailable(RETRY_AFTER));
+
+        assertThat(whenAJobIsSubmitted()).hasContentTypeCompatibleWith(MediaType.APPLICATION_PROBLEM_JSON)
+                .bodyJson().isLenientlyEqualTo("""
+                        {"status": 503, "title": "Job queue unavailable"}""");
+    }
+
+    @Test
+    void describesARejectedPublishAsAProblemDocument() {
+        givenTheSubmissionIs(new PublishOutcome.Rejected("RecordTooLargeException"));
+
+        assertThat(whenAJobIsSubmitted()).hasContentTypeCompatibleWith(MediaType.APPLICATION_PROBLEM_JSON)
+                .bodyJson().isLenientlyEqualTo("""
+                        {"status": 500, "title": "Job rejected"}""");
+    }
+
+    @Test
+    void answersAValidationFailureWithAProblemDocumentNamingTheField() {
+        assertThat(whenAJobIsSubmittedWith("""
+                {"model": "Llama3:8B", "prompt": "why is the sky blue?", "maxTokens": 128}"""))
+                .hasStatus(HttpStatus.BAD_REQUEST)
+                .hasContentTypeCompatibleWith(MediaType.APPLICATION_PROBLEM_JSON)
+                .bodyJson().extractingPath("$.errors.model").asArray().isNotEmpty();
+    }
+
+    @Test
+    void doesNotAskTheServiceToPublishASubmissionItRefused() {
+        whenAJobIsSubmittedWith("""
+                {"model": "Llama3:8B", "prompt": "why is the sky blue?", "maxTokens": 128}""");
+
+        verifyNoInteractions(submissions);
     }
 
     private void givenTheSubmissionIs(final PublishOutcome outcome) {
@@ -98,10 +136,14 @@ class JobControllerTest {
     }
 
     private MvcTestResult whenAJobIsSubmitted() {
+        return whenAJobIsSubmittedWith(SUBMISSION);
+    }
+
+    private MvcTestResult whenAJobIsSubmittedWith(final String submission) {
         return mvc.post()
                 .uri("/jobs")
                 .contentType(MediaType.APPLICATION_JSON)
-                .content(SUBMISSION)
+                .content(submission)
                 .exchange();
     }
 }

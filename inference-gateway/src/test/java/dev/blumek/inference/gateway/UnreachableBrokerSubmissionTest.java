@@ -34,7 +34,13 @@ class UnreachableBrokerSubmissionTest {
 
     @Test
     void doesNotHandTheClientAJobIdItNeverQueued() {
-        whenAJobIsSubmitted().expectBody().isEmpty();
+        whenAJobIsSubmitted().expectBody().jsonPath("$.jobId").doesNotExist();
+    }
+
+    @Test
+    void explainsTheRefusalAsAProblemDocument() {
+        whenAJobIsSubmitted().expectHeader().contentTypeCompatibleWith(MediaType.APPLICATION_PROBLEM_JSON)
+                .expectBody().jsonPath("$.title").isEqualTo("Job queue unavailable");
     }
 
     @Test

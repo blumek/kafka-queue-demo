@@ -1,8 +1,7 @@
 package dev.blumek.inference.gateway.submission;
 
 import dev.blumek.inference.domain.model.JobId;
-import org.springframework.http.HttpHeaders;
-import org.springframework.http.HttpStatus;
+import jakarta.validation.Valid;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
@@ -23,17 +22,15 @@ class JobController {
     }
 
     @PostMapping
-    CompletableFuture<ResponseEntity<JobAcceptedResponse>> submit(@RequestBody final SubmitJobRequest request) {
+    CompletableFuture<ResponseEntity<JobAcceptedResponse>> submit(@Valid @RequestBody final SubmitJobRequest request) {
         return submissions.submit(request).thenApply(JobController::respondTo);
     }
 
     private static ResponseEntity<JobAcceptedResponse> respondTo(final Submission submission) {
         return switch (submission.outcome()) {
             case PublishOutcome.Accepted ignored -> accepted(submission.jobId());
-            case PublishOutcome.Unavailable unavailable -> ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE)
-                    .header(HttpHeaders.RETRY_AFTER, String.valueOf(unavailable.retryAfter().toSeconds()))
-                    .build();
-            case PublishOutcome.Rejected ignored -> ResponseEntity.internalServerError().build();
+            case PublishOutcome.Unavailable unavailable -> throw new PublisherUnavailableException(unavailable.retryAfter());
+            case PublishOutcome.Rejected rejected -> throw new PublishRejectedException(rejected.reason());
         };
     }
 
