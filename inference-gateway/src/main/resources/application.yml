@@ -6,6 +6,12 @@ spring:
     name: inference-gateway
   kafka:
     bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+  mvc:
+    async:
+      request-timeout: 45s
+  task:
+    execution:
+      mode: force
 
 management:
   endpoints:

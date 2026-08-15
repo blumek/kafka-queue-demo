@@ -7,6 +7,7 @@ import org.junit.jupiter.api.Test;
 
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ThreadPoolExecutor;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatNoException;
@@ -108,5 +109,32 @@ class KafkaProducerConfigurationTest {
         final var actualConfiguration = whenTheProducerIsConfigured();
 
         assertThat(actualConfiguration).containsEntry(ProducerConfig.MAX_BLOCK_MS_CONFIG, 5_000L);
+    }
+
+    @Test
+    void boundsTheQueueOfSendsWaitingForAThread() {
+        try (final var actualExecutor = whenTheSendExecutorIsConfigured()) {
+            assertThat(actualExecutor.getQueue().remainingCapacity()).isEqualTo(64);
+        }
+    }
+
+    private ThreadPoolExecutor whenTheSendExecutorIsConfigured() {
+        return (ThreadPoolExecutor) new KafkaProducerConfiguration().jobSendExecutor();
+    }
+
+    @Test
+    void shedsSendsInsteadOfQueueingThemWithoutBound() {
+        try (final var actualExecutor = whenTheSendExecutorIsConfigured()) {
+            assertThat(actualExecutor.getRejectedExecutionHandler())
+                    .isInstanceOf(ThreadPoolExecutor.AbortPolicy.class);
+        }
+    }
+
+    @Test
+    void namesTheSendThreadsSoAStackDumpShowsWhereARequestIsStuck() throws Exception {
+        try (final var actualExecutor = whenTheSendExecutorIsConfigured()) {
+            assertThat(actualExecutor.submit(() -> Thread.currentThread().getName()).get())
+                    .startsWith("job-send-");
+        }
     }
 }

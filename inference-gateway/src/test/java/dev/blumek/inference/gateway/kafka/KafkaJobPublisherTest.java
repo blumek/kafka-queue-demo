@@ -22,23 +22,30 @@ import org.springframework.kafka.support.SendResult;
 
 import java.time.Duration;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.Executor;
+import java.util.concurrent.RejectedExecutionException;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatNullPointerException;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 class KafkaJobPublisherTest {
     private static final String JOB_ID = "8b9f2a1c-0d3e-4f5a-9b6c-7d8e9f0a1b2c";
     private static final Duration RETRY_AFTER = Duration.ofSeconds(5);
+    private static final Duration PUBLISH_TIMEOUT = Duration.ofSeconds(40);
+    private static final Executor ON_THE_CALLING_THREAD = Runnable::run;
 
     @SuppressWarnings("unchecked")
     private final KafkaTemplate<String, InferenceRequest> template = mock(KafkaTemplate.class);
 
-    private final KafkaJobPublisher publisher = new KafkaJobPublisher(template, RETRY_AFTER);
+    private final KafkaJobPublisher publisher =
+            new KafkaJobPublisher(template, ON_THE_CALLING_THREAD, PUBLISH_TIMEOUT, RETRY_AFTER);
 
     @Test
     void keysEveryRecordByItsJobId() {
@@ -174,6 +181,54 @@ class KafkaJobPublisherTest {
     @Test
     void rejectsANullRequest() {
         assertThatNullPointerException().isThrownBy(() -> publisher.publish(null));
+    }
+
+    @Test
+    void handsTheBlockingSendToTheExecutorInsteadOfRunningItOnTheCaller() {
+        givenTheBrokerAcknowledges();
+        final var queued = new ArrayList<Runnable>();
+        final var offloading = new KafkaJobPublisher(template, queued::add, PUBLISH_TIMEOUT, RETRY_AFTER);
+
+        final var actualOutcome = offloading.publish(givenARequest());
+
+        assertThat(actualOutcome).isNotDone();
+        queued.forEach(Runnable::run);
+        assertThat(actualOutcome).isCompletedWithValue(new PublishOutcome.Accepted());
+    }
+
+    @Test
+    void shedsTheSubmissionWhenNoSendThreadCanTakeIt() {
+        final var saturated = givenAnExecutorThatRejectsEverything();
+
+        final var actualOutcome = new KafkaJobPublisher(template, saturated, PUBLISH_TIMEOUT, RETRY_AFTER)
+                .publish(givenARequest());
+
+        assertThat(actualOutcome).isCompletedWithValue(new PublishOutcome.Unavailable(RETRY_AFTER));
+    }
+
+    @Test
+    void doesNotTouchTheProducerWhenItShedsTheSubmission() {
+        new KafkaJobPublisher(template, givenAnExecutorThatRejectsEverything(), PUBLISH_TIMEOUT, RETRY_AFTER)
+                .publish(givenARequest());
+
+        verifyNoInteractions(template);
+    }
+
+    @Test
+    void asksTheCallerToRetryWhenTheSendNeverSettles() {
+        when(template.send(any(ProducerRecord.class))).thenReturn(new CompletableFuture<>());
+        final var impatient = new KafkaJobPublisher(template, ON_THE_CALLING_THREAD, Duration.ofMillis(50), RETRY_AFTER);
+
+        final var actualOutcome = impatient.publish(givenARequest());
+
+        assertThat(actualOutcome).succeedsWithin(Duration.ofSeconds(5))
+                .isEqualTo(new PublishOutcome.Unavailable(RETRY_AFTER));
+    }
+
+    private static Executor givenAnExecutorThatRejectsEverything() {
+        return _ -> {
+            throw new RejectedExecutionException("send queue is full");
+        };
     }
 
     private void givenTheBrokerAcknowledges() {

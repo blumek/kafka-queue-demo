@@ -11,16 +11,26 @@ import org.springframework.kafka.support.SendResult;
 
 import java.time.Duration;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.Executor;
+import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.TimeUnit;
 import java.util.function.BiFunction;
 
 import static java.util.Objects.requireNonNull;
 
 class KafkaJobPublisher implements JobPublisher {
     private final KafkaTemplate<String, InferenceRequest> template;
+    private final Executor sends;
+    private final Duration publishTimeout;
     private final Duration retryAfter;
 
-    KafkaJobPublisher(final KafkaTemplate<String, InferenceRequest> template, final Duration retryAfter) {
+    KafkaJobPublisher(final KafkaTemplate<String, InferenceRequest> template,
+                      final Executor sends,
+                      final Duration publishTimeout,
+                      final Duration retryAfter) {
         this.template = template;
+        this.sends = sends;
+        this.publishTimeout = publishTimeout;
         this.retryAfter = retryAfter;
     }
 
@@ -28,10 +38,19 @@ class KafkaJobPublisher implements JobPublisher {
     public CompletableFuture<PublishOutcome> publish(final InferenceRequest request) {
         requireNonNull(request);
         final var record = new ProducerRecord<>(InferenceTopics.JOBS, request.jobId().value(), request);
-        return send(record);
+        return sendOffTheCallingThread(record)
+                .completeOnTimeout(unavailable(), publishTimeout.toMillis(), TimeUnit.MILLISECONDS);
     }
 
-    private CompletableFuture<PublishOutcome> send(ProducerRecord<String, InferenceRequest> record) {
+    private CompletableFuture<PublishOutcome> sendOffTheCallingThread(final ProducerRecord<String, InferenceRequest> record) {
+        try {
+            return CompletableFuture.supplyAsync(() -> send(record), sends).thenCompose(outcome -> outcome);
+        } catch (final RejectedExecutionException exception) {
+            return CompletableFuture.completedFuture(unavailable());
+        }
+    }
+
+    private CompletableFuture<PublishOutcome> send(final ProducerRecord<String, InferenceRequest> record) {
         try {
             return template.send(record).handle(handleResult());
         } catch (final RuntimeException exception) {
@@ -49,11 +68,15 @@ class KafkaJobPublisher implements JobPublisher {
         var deepest = throwable;
         for (var current = throwable; current != null; current = causeOf(current)) {
             if (current instanceof RetriableException) {
-                return new PublishOutcome.Unavailable(retryAfter);
+                return unavailable();
             }
             deepest = current;
         }
         return new PublishOutcome.Rejected(String.valueOf(deepest));
+    }
+
+    private PublishOutcome unavailable() {
+        return new PublishOutcome.Unavailable(retryAfter);
     }
 
     private static Throwable causeOf(final Throwable throwable) {
