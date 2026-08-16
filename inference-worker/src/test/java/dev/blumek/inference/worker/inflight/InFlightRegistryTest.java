@@ -5,6 +5,7 @@ import dev.blumek.inference.domain.model.JobId;
 import dev.blumek.inference.domain.model.ModelId;
 import dev.blumek.inference.messaging.InferenceTopics;
 import dev.blumek.inference.worker.processing.Disposition;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.apache.kafka.common.TopicPartition;
 import org.junit.jupiter.api.Test;
 
@@ -20,17 +21,15 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 class InFlightRegistryTest {
     private static final Instant DISPATCHED_AT = Instant.parse("2026-08-16T09:00:00Z");
-    private static final Duration LOCK_TIMEOUT = Duration.ofSeconds(30);
-    private static final Duration HALF_THE_LOCK = LOCK_TIMEOUT.dividedBy(2);
     private static final Duration ONE_SECOND = Duration.ofSeconds(1);
     private static final int POLL_LIMIT = 8;
-    private static final int MAX_RENEWALS = 3;
     private static final int FIRST_DELIVERY = 1;
     private static final int WORKER_THREADS = 4;
     private static final Disposition ACCEPTED = new Disposition.Accept();
 
     private final MutableClock clock = new MutableClock(DISPATCHED_AT);
-    private final InFlightRegistry registry = new InFlightRegistry(clock, POLL_LIMIT, MAX_RENEWALS);
+    private final SimpleMeterRegistry meterRegistry = new SimpleMeterRegistry();
+    private final InFlightRegistry registry = new InFlightRegistry(POLL_LIMIT, new LockMeters(meterRegistry));
 
     @Test
     void countsEveryDispatchedRecordAsInFlight() {
@@ -185,74 +184,39 @@ class InFlightRegistryTest {
     }
 
     @Test
-    void renewsNothingBeforeHalfTheLockHasElapsed() {
-        registry.track(givenAcquired(0, 0L));
+    void countsHowOftenAJobWasRenewedBeforeItFinished() {
+        final var inFlight = givenAcquired(0, 0L);
+        registry.track(inFlight.refreshed(DISPATCHED_AT).refreshed(DISPATCHED_AT));
+        whenCompleted(inFlight);
 
-        whenTimePasses(HALF_THE_LOCK.minus(ONE_SECOND));
+        registry.drainCompleted();
 
-        assertThat(registry.needingRenewal(LOCK_TIMEOUT)).isEmpty();
+        assertThat(meterRegistry.summary(LockMeters.RENEWALS_PER_JOB).max()).isEqualTo(2.0);
     }
 
     @Test
-    void renewsOnceHalfTheLockHasElapsed() {
+    void countsTheLateCompletionOfARecordWhoseLockWasGivenUp() {
         final var inFlight = givenAcquired(0, 0L);
         registry.track(inFlight);
+        registry.abandon(inFlight.ref());
+        whenCompleted(inFlight);
 
-        whenTimePasses(HALF_THE_LOCK);
+        registry.drainCompleted();
 
-        assertThat(registry.needingRenewal(LOCK_TIMEOUT)).containsExactly(inFlight);
+        assertThat(meterRegistry.counter(LockMeters.LATE_COMPLETIONS).count()).isEqualTo(1.0);
     }
 
     @Test
-    void measuresTheNextRenewalFromTheRefreshRatherThanTheAcquisition() {
-        givenRenewedOnce();
-
-        whenTimePasses(ONE_SECOND);
-
-        assertThat(registry.needingRenewal(LOCK_TIMEOUT)).isEmpty();
-    }
-
-    @Test
-    void renewsAgainOnceHalfTheLockHasElapsedSinceTheRefresh() {
-        givenRenewedOnce();
-
-        whenTimePasses(HALF_THE_LOCK);
-
-        assertThat(registry.needingRenewal(LOCK_TIMEOUT))
-                .singleElement()
-                .satisfies(inFlight -> assertThat(inFlight.renewals()).isEqualTo(1));
-    }
-
-    private void givenRenewedOnce() {
+    void keepsTrackingARecordRedeliveredAfterItsLockWasGivenUp() {
+        final var lost = givenAcquired(0, 0L);
+        registry.track(lost);
+        registry.abandon(lost.ref());
         registry.track(givenAcquired(0, 0L));
-        whenTimePasses(HALF_THE_LOCK);
-        whenRenewed(registry.needingRenewal(LOCK_TIMEOUT));
-    }
 
-    @Test
-    void stopsRenewingAtTheRenewalCeiling() {
-        givenRenewalsExhausted();
-
-        whenTimePasses(HALF_THE_LOCK);
-
-        assertThat(registry.needingRenewal(LOCK_TIMEOUT)).isEmpty();
-    }
-
-    @Test
-    void keepsAWedgedRecordTrackedOnceItsRenewalsAreExhausted() {
-        givenRenewalsExhausted();
-
-        whenTimePasses(LOCK_TIMEOUT);
+        whenCompleted(lost);
+        registry.drainCompleted();
 
         assertThat(registry.size()).isEqualTo(1);
-    }
-
-    private void givenRenewalsExhausted() {
-        registry.track(givenAcquired(0, 0L));
-        IntStream.range(0, MAX_RENEWALS).forEach(renewal -> {
-            whenTimePasses(HALF_THE_LOCK);
-            whenRenewed(registry.needingRenewal(LOCK_TIMEOUT));
-        });
     }
 
     @Test
@@ -296,10 +260,10 @@ class InFlightRegistryTest {
 
     @Test
     void acceptsARefreshedRecordWhileHoldingAFullBatch() {
-        givenDispatched(POLL_LIMIT);
-        whenTimePasses(HALF_THE_LOCK);
+        final var dispatched = givenDispatched(POLL_LIMIT);
+        whenTimePasses(ONE_SECOND);
 
-        whenRenewed(registry.needingRenewal(LOCK_TIMEOUT));
+        whenRenewed(dispatched);
 
         assertThat(registry.size()).isEqualTo(POLL_LIMIT);
     }

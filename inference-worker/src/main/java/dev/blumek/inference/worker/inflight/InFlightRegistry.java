@@ -3,7 +3,6 @@ package dev.blumek.inference.worker.inflight;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
@@ -24,33 +23,23 @@ public final class InFlightRegistry {
     private final Map<RecordRef, InFlight> entries = new HashMap<>();
     private final Set<RecordRef> abandoned = new HashSet<>();
     private final BlockingQueue<Completion> completions = new LinkedBlockingQueue<>();
-    private final Clock clock;
     private final int maxInFlight;
-    private final int maxRenewals;
+    private final LockMeters meters;
 
-    public InFlightRegistry(final Clock clock, final int maxInFlight, final int maxRenewals) {
-        this.clock = clock;
+    public InFlightRegistry(final int maxInFlight, final LockMeters meters) {
         this.maxInFlight = maxInFlight;
-        this.maxRenewals = maxRenewals;
+        this.meters = meters;
     }
 
     public void track(final InFlight inFlight) {
         rejectWhenFull(inFlight.ref());
         entries.put(inFlight.ref(), inFlight);
-        warnWhenRenewalsAreExhausted(inFlight);
     }
 
     private void rejectWhenFull(final RecordRef ref) {
         if (entries.size() >= maxInFlight && !entries.containsKey(ref)) {
             throw new IllegalStateException("Tracking %s would exceed the in-flight limit of %d"
                     .formatted(ref, maxInFlight));
-        }
-    }
-
-    private void warnWhenRenewalsAreExhausted(final InFlight inFlight) {
-        if (inFlight.renewals() == maxRenewals) {
-            LOG.warn("Lock for {} was renewed {} times and will not be renewed again; "
-                    + "the record will lapse and be redelivered", inFlight.ref(), maxRenewals);
         }
     }
 
@@ -96,23 +85,17 @@ public final class InFlightRegistry {
     }
 
     private boolean forget(final RecordRef ref) {
-        if (entries.remove(ref) != null) {
-            return true;
-        }
         if (abandoned.remove(ref)) {
             LOG.debug("Discarding the completion of {} because its lock was already given up", ref);
+            meters.completedAfterTheLockWasGivenUp();
             return false;
         }
-        throw new IllegalStateException("Completion for untracked record " + ref);
-    }
-
-    public List<InFlight> needingRenewal(final Duration lockTimeout) {
-        final var threshold = lockTimeout.dividedBy(2);
-        final var now = clock.instant();
-        return entries.values().stream()
-                .filter(inFlight -> inFlight.heldSinceLockRefresh(now).compareTo(threshold) >= 0)
-                .filter(inFlight -> inFlight.renewals() < maxRenewals)
-                .toList();
+        final var finished = entries.remove(ref);
+        if (finished == null) {
+            throw new IllegalStateException("Completion for untracked record " + ref);
+        }
+        meters.jobFinished(finished.renewals());
+        return true;
     }
 
     public List<InFlight> abandonAll() {

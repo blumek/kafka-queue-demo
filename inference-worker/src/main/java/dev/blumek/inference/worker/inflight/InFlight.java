@@ -39,7 +39,7 @@ public record InFlight(RecordRef ref,
         return new InFlight(ref, request, deliveryCount, acquiredAt, refreshedAt, renewals + 1);
     }
 
-    public Duration heldSinceLockRefresh(final Instant now) {
-        return Duration.between(lockRefreshedAt, now);
+    public Duration heldSince(final Instant now) {
+        return Duration.between(acquiredAt, now);
     }
 }

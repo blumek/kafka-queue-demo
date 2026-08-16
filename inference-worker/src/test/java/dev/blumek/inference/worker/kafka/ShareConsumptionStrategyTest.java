@@ -8,10 +8,14 @@ import dev.blumek.inference.domain.port.EngineOutcome;
 import dev.blumek.inference.domain.port.InferenceEngine;
 import dev.blumek.inference.messaging.InferenceTopics;
 import dev.blumek.inference.worker.inflight.InFlightRegistry;
+import dev.blumek.inference.worker.inflight.LockLoss;
+import dev.blumek.inference.worker.inflight.LockMeters;
 import dev.blumek.inference.worker.inflight.RecordRef;
+import dev.blumek.inference.worker.inflight.RenewalPolicy;
 import dev.blumek.inference.worker.processing.Disposition;
 import dev.blumek.inference.worker.processing.DispositionClassifier;
 import dev.blumek.inference.worker.processing.JobProcessor;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.apache.kafka.clients.consumer.AcknowledgeType;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.apache.kafka.common.TopicPartition;
@@ -41,18 +45,22 @@ class ShareConsumptionStrategyTest {
     private static final Duration PATIENCE = Duration.ofSeconds(10);
     private static final Instant SUBMITTED_AT = Instant.parse("2026-08-16T09:00:00Z");
     private static final int BATCH_LIMIT = 4;
-    private static final int UNLIMITED_RENEWALS = Integer.MAX_VALUE;
     private static final int FIRST_DELIVERY = 1;
     private static final int SECOND_DELIVERY = 2;
     private static final Duration A_SHORT_DELAY = Duration.ofSeconds(30);
+    private static final Duration A_ROOMY_BUDGET = Duration.ofMinutes(5);
+    private static final Duration ROOM_FOR_ONE_RENEWAL = LOCK_TIMEOUT.multipliedBy(3).dividedBy(4);
 
     private final FakeShareConsumer consumer = new FakeShareConsumer(LOCK_TIMEOUT);
-    private final InFlightRegistry registry = new InFlightRegistry(Clock.systemUTC(), BATCH_LIMIT, UNLIMITED_RENEWALS);
+    private final SimpleMeterRegistry meterRegistry = new SimpleMeterRegistry();
+    private final LockMeters meters = new LockMeters(meterRegistry);
+    private final InFlightRegistry registry = new InFlightRegistry(BATCH_LIMIT, meters);
     private final ExecutorService workers = Executors.newVirtualThreadPerTaskExecutor();
     private final ConcurrentLinkedQueue<Integer> deliveryCounts = new ConcurrentLinkedQueue<>();
 
     private InferenceEngine engine = request -> new EngineOutcome.Completed(givenAResult(request));
     private DispositionClassifier classifier = (outcome, deliveryCount) -> new Disposition.Accept();
+    private RenewalPolicy renewalPolicy = RenewalPolicy.over(A_ROOMY_BUDGET);
     private ShareConsumptionStrategy strategy;
     private Thread loop;
 
@@ -150,6 +158,95 @@ class ShareConsumptionStrategyTest {
     }
 
     @Test
+    void countsEveryRenewalItIssues() {
+        final var stillRunning = givenTheEngineBlocks();
+        givenTheLoopIsRunning();
+        whenDelivered(givenARecord(0, 0L));
+
+        awaitUntil(() -> renewalsOf(givenRef(0, 0L)) >= 2);
+
+        assertThat(meterRegistry.counter(LockMeters.RENEWED).count()).isGreaterThanOrEqualTo(2.0);
+        stillRunning.countDown();
+    }
+
+    @Test
+    void recordsHowOftenAJobWasRenewedBeforeItFinished() {
+        final var stillRunning = givenTheEngineBlocks();
+        givenTheLoopIsRunning();
+        whenDelivered(givenARecord(0, 0L));
+        awaitUntil(() -> renewalsOf(givenRef(0, 0L)) >= 2);
+
+        stillRunning.countDown();
+
+        whenAcknowledged(givenRef(0, 0L));
+        assertThat(meterRegistry.summary(LockMeters.RENEWALS_PER_JOB).max()).isGreaterThanOrEqualTo(2.0);
+    }
+
+    @Test
+    void releasesAJobThatOutranItsProcessingBudget() {
+        renewalPolicy = RenewalPolicy.over(ROOM_FOR_ONE_RENEWAL);
+        final var stillRunning = givenTheEngineBlocks();
+        givenTheLoopIsRunning();
+
+        whenDelivered(givenARecord(0, 0L));
+
+        assertThat(whenAcknowledged(givenRef(0, 0L)))
+                .containsExactly(AcknowledgeType.RENEW, AcknowledgeType.RELEASE);
+        stillRunning.countDown();
+    }
+
+    @Test
+    void countsTheLockOfAJobThatOutranItsBudgetAsExpired() {
+        renewalPolicy = RenewalPolicy.over(ROOM_FOR_ONE_RENEWAL);
+        final var stillRunning = givenTheEngineBlocks();
+        givenTheLoopIsRunning();
+
+        whenDelivered(givenARecord(0, 0L));
+
+        whenAcknowledged(givenRef(0, 0L));
+        assertThat(whenExpired(LockLoss.RENEWALS_EXHAUSTED)).isEqualTo(1.0);
+        stillRunning.countDown();
+    }
+
+    @Test
+    void letsAWedgedJobFinishOnItsOwnRatherThanInterruptingIt() {
+        renewalPolicy = RenewalPolicy.over(ROOM_FOR_ONE_RENEWAL);
+        final var stillRunning = givenTheEngineBlocks();
+        final var finished = givenTheEngineCountsWhatItFinished();
+        givenTheLoopIsRunning();
+        whenDelivered(givenARecord(0, 0L));
+        whenAcknowledged(givenRef(0, 0L));
+
+        stillRunning.countDown();
+
+        awaitUntil(() -> finished.get() == 1);
+    }
+
+    @Test
+    void keepsPollingAfterGivingUpOnAWedgedJob() {
+        renewalPolicy = RenewalPolicy.over(ROOM_FOR_ONE_RENEWAL);
+        final var stillRunning = givenTheEngineBlocks();
+        givenTheLoopIsRunning();
+        whenDelivered(givenARecord(0, 0L));
+        whenAcknowledged(givenRef(0, 0L));
+        stillRunning.countDown();
+
+        whenDelivered(givenARecord(1, 0L));
+
+        assertThat(whenAcknowledged(givenRef(1, 0L))).containsExactly(AcknowledgeType.ACCEPT);
+    }
+
+    @Test
+    void countsALockLostMidFlightAsExpired() {
+        consumer.loseTheLockOf(givenRef(0, 0L));
+        givenTheLoopIsRunning();
+
+        whenDelivered(givenARecord(0, 0L));
+
+        awaitUntil(() -> whenExpired(LockLoss.ACKNOWLEDGEMENT_REFUSED) == 1.0);
+    }
+
+    @Test
     void runsARecordOnlyOnceHoweverOftenRenewalRedeliversIt() {
         final var stillRunning = givenTheEngineBlocks();
         final var started = givenTheEngineCountsItsCalls();
@@ -205,7 +302,7 @@ class ShareConsumptionStrategyTest {
 
     private void givenTheLoopIsRunning() {
         strategy = new ShareConsumptionStrategy(consumer, givenAProcessor(), registry, workers, Clock.systemUTC(),
-                POLL_TIMEOUT);
+                POLL_TIMEOUT, renewalPolicy, meters);
         loop = Thread.ofPlatform().name("test-poll-loop").start(strategy::consume);
     }
 
@@ -224,6 +321,21 @@ class ShareConsumptionStrategyTest {
             return completing.run(request);
         };
         return stillRunning;
+    }
+
+    private AtomicInteger givenTheEngineCountsWhatItFinished() {
+        final var finished = new AtomicInteger();
+        final var counted = engine;
+        engine = request -> {
+            final var outcome = counted.run(request);
+            finished.incrementAndGet();
+            return outcome;
+        };
+        return finished;
+    }
+
+    private double whenExpired(final LockLoss loss) {
+        return meterRegistry.counter(LockMeters.EXPIRED, LockMeters.REASON, loss.tag()).count();
     }
 
     private AtomicInteger givenTheEngineCountsItsCalls() {

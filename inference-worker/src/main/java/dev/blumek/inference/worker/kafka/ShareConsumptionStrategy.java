@@ -5,7 +5,11 @@ import dev.blumek.inference.messaging.InferenceTopics;
 import dev.blumek.inference.worker.inflight.Completion;
 import dev.blumek.inference.worker.inflight.InFlight;
 import dev.blumek.inference.worker.inflight.InFlightRegistry;
+import dev.blumek.inference.worker.inflight.LockLoss;
+import dev.blumek.inference.worker.inflight.LockMeters;
 import dev.blumek.inference.worker.inflight.RecordRef;
+import dev.blumek.inference.worker.inflight.RenewalPolicy;
+import dev.blumek.inference.worker.inflight.RenewalSchedule;
 import dev.blumek.inference.worker.processing.Disposition;
 import dev.blumek.inference.worker.processing.JobProcessor;
 import org.apache.kafka.clients.consumer.AcknowledgeType;
@@ -40,9 +44,11 @@ public final class ShareConsumptionStrategy implements ConsumptionStrategy {
     private final Executor workers;
     private final Clock clock;
     private final Duration pollTimeout;
+    private final RenewalPolicy renewalPolicy;
+    private final LockMeters meters;
     private final Map<RecordRef, Disposition> settled = new HashMap<>();
 
-    private Duration lockTimeout = ASSUMED_LOCK_TIMEOUT;
+    private RenewalSchedule schedule;
     private volatile boolean running;
 
     public ShareConsumptionStrategy(final ShareConsumer<String, InferenceRequest> consumer,
@@ -50,13 +56,18 @@ public final class ShareConsumptionStrategy implements ConsumptionStrategy {
                                     final InFlightRegistry registry,
                                     final Executor workers,
                                     final Clock clock,
-                                    final Duration pollTimeout) {
+                                    final Duration pollTimeout,
+                                    final RenewalPolicy renewalPolicy,
+                                    final LockMeters meters) {
         this.consumer = consumer;
         this.processor = processor;
         this.registry = registry;
         this.workers = workers;
         this.clock = clock;
         this.pollTimeout = pollTimeout;
+        this.renewalPolicy = renewalPolicy;
+        this.meters = meters;
+        this.schedule = renewalPolicy.against(ASSUMED_LOCK_TIMEOUT);
     }
 
     @Override
@@ -88,16 +99,27 @@ public final class ShareConsumptionStrategy implements ConsumptionStrategy {
     private void giveUp(final RecordRef ref) {
         registry.abandon(ref);
         settled.remove(ref);
+        meters.expired(LockLoss.ACKNOWLEDGEMENT_LOST);
     }
 
     private List<ConsumerRecord<String, InferenceRequest>> poll() {
         final var records = consumer.poll(pollTimeout);
-        lockTimeout = consumer.acquisitionLockTimeoutMs()
+        consumer.acquisitionLockTimeoutMs()
                 .map(Duration::ofMillis)
-                .orElse(lockTimeout);
+                .ifPresent(this::rescheduleRenewals);
         final var delivered = new ArrayList<ConsumerRecord<String, InferenceRequest>>();
         records.forEach(delivered::add);
         return delivered;
+    }
+
+    private void rescheduleRenewals(final Duration lockTimeout) {
+        final var rescheduled = renewalPolicy.against(lockTimeout);
+        if (rescheduled.equals(schedule)) {
+            return;
+        }
+        LOG.info("Renewing acquisition locks every {} and at most {} times against a lock lasting {}",
+                rescheduled.renewAfter(), rescheduled.maxRenewals(), lockTimeout);
+        schedule = rescheduled;
     }
 
     private void dispatchNewlyAcquired(final List<ConsumerRecord<String, InferenceRequest>> delivered) {
@@ -136,9 +158,8 @@ public final class ShareConsumptionStrategy implements ConsumptionStrategy {
 
     private Instant renewalDeadline(final List<ConsumerRecord<String, InferenceRequest>> delivered) {
         return trackedAmong(delivered)
-                .map(InFlight::lockRefreshedAt)
+                .map(schedule::dueAt)
                 .min(Comparator.naturalOrder())
-                .map(refreshedAt -> refreshedAt.plus(lockTimeout.dividedBy(2)))
                 .orElseGet(clock::instant);
     }
 
@@ -175,7 +196,7 @@ public final class ShareConsumptionStrategy implements ConsumptionStrategy {
             return;
         }
         registry.tracking(ref).ifPresentOrElse(
-                inFlight -> renew(record, inFlight),
+                inFlight -> renewOrGiveUp(record, inFlight),
                 () -> acknowledgeSafely(record, ref, AcknowledgeType.RELEASE));
     }
 
@@ -189,6 +210,7 @@ public final class ShareConsumptionStrategy implements ConsumptionStrategy {
             LOG.warn("Acknowledging {} as {} was refused; the record is already on its way to another consumer",
                     ref, type, lockLost);
             registry.abandon(ref);
+            meters.expired(LockLoss.ACKNOWLEDGEMENT_REFUSED);
             return false;
         }
     }
@@ -202,9 +224,28 @@ public final class ShareConsumptionStrategy implements ConsumptionStrategy {
         };
     }
 
+    private void renewOrGiveUp(final ConsumerRecord<String, InferenceRequest> record, final InFlight inFlight) {
+        if (schedule.isExhausted(inFlight)) {
+            giveUpOn(record, inFlight);
+            return;
+        }
+        renew(record, inFlight);
+    }
+
     private void renew(final ConsumerRecord<String, InferenceRequest> record, final InFlight inFlight) {
         if (acknowledgeSafely(record, inFlight.ref(), AcknowledgeType.RENEW)) {
             registry.track(inFlight.refreshed(clock.instant()));
+            meters.renewed();
+        }
+    }
+
+    private void giveUpOn(final ConsumerRecord<String, InferenceRequest> record, final InFlight inFlight) {
+        LOG.warn("Job {} has held its lock for {} across {} renewals without finishing; "
+                        + "releasing it for another worker while it runs on here",
+                inFlight.request().jobId().value(), inFlight.heldSince(clock.instant()), inFlight.renewals());
+        if (acknowledgeSafely(record, inFlight.ref(), AcknowledgeType.RELEASE)) {
+            registry.abandon(inFlight.ref());
+            meters.expired(LockLoss.RENEWALS_EXHAUSTED);
         }
     }
 

@@ -9,9 +9,12 @@ import dev.blumek.inference.domain.port.InferenceEngine;
 import dev.blumek.inference.messaging.InferenceSerdes;
 import dev.blumek.inference.messaging.InferenceTopics;
 import dev.blumek.inference.worker.inflight.InFlightRegistry;
+import dev.blumek.inference.worker.inflight.LockMeters;
+import dev.blumek.inference.worker.inflight.RenewalPolicy;
 import dev.blumek.inference.worker.processing.Disposition;
 import dev.blumek.inference.worker.processing.DispositionClassifier;
 import dev.blumek.inference.worker.processing.JobProcessor;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.apache.kafka.clients.admin.Admin;
 import org.apache.kafka.clients.admin.AdminClientConfig;
 import org.apache.kafka.clients.admin.AlterConfigOp;
@@ -58,7 +61,7 @@ class ShareConsumptionIT {
     private static final Duration ROOMY_LOCK = Duration.ofSeconds(30);
     private static final Duration TIGHT_LOCK = Duration.ofSeconds(4);
     private static final Duration ENGINE_LATENCY = Duration.ofMillis(300);
-    private static final int UNLIMITED_RENEWALS = Integer.MAX_VALUE;
+    private static final Duration PROCESSING_BUDGET = Duration.ofMinutes(5);
     private static final int PER_INSTANCE_CONCURRENCY = 4;
     private static final int ONE_JOB_AT_A_TIME = 1;
     private static final int INSTANCES = 8;
@@ -152,10 +155,11 @@ class ShareConsumptionIT {
                                 final InferenceEngine engine) {
         final var consumer = ShareConsumerFactory.jobConsumer(
                 ShareConsumerFactory.consumerConfiguration(KAFKA.getBootstrapServers(), group, maxPollRecords));
-        final var registry = new InFlightRegistry(Clock.systemUTC(), maxPollRecords, UNLIMITED_RENEWALS);
+        final var meters = new LockMeters(new SimpleMeterRegistry());
+        final var registry = new InFlightRegistry(maxPollRecords, meters);
         final var processor = new JobProcessor(engine, givenACompletionLedger(ledger));
         final var strategy = new ShareConsumptionStrategy(consumer, processor, registry, jobThreads, Clock.systemUTC(),
-                POLL_TIMEOUT);
+                POLL_TIMEOUT, RenewalPolicy.over(PROCESSING_BUDGET), meters);
         workers.add(new RunningWorker(consumer, strategy, Thread.ofPlatform().start(strategy::consume)));
     }
 
