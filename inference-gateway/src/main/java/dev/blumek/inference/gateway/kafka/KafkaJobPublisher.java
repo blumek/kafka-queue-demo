@@ -3,7 +3,9 @@ package dev.blumek.inference.gateway.kafka;
 import dev.blumek.inference.domain.model.InferenceRequest;
 import dev.blumek.inference.gateway.submission.JobPublisher;
 import dev.blumek.inference.gateway.submission.PublishOutcome;
+import dev.blumek.inference.gateway.tracing.TraceOrigin;
 import dev.blumek.inference.messaging.InferenceTopics;
+import dev.blumek.inference.messaging.JobHeaders;
 import org.apache.kafka.clients.producer.ProducerRecord;
 import org.apache.kafka.common.errors.RetriableException;
 import org.springframework.kafka.core.KafkaTemplate;
@@ -20,15 +22,18 @@ import static java.util.Objects.requireNonNull;
 
 class KafkaJobPublisher implements JobPublisher {
     private final KafkaTemplate<String, InferenceRequest> template;
+    private final TraceOrigin traceOrigin;
     private final Executor sends;
     private final Duration publishTimeout;
     private final Duration retryAfter;
 
     KafkaJobPublisher(final KafkaTemplate<String, InferenceRequest> template,
+                      final TraceOrigin traceOrigin,
                       final Executor sends,
                       final Duration publishTimeout,
                       final Duration retryAfter) {
         this.template = template;
+        this.traceOrigin = traceOrigin;
         this.sends = sends;
         this.publishTimeout = publishTimeout;
         this.retryAfter = retryAfter;
@@ -37,9 +42,14 @@ class KafkaJobPublisher implements JobPublisher {
     @Override
     public CompletableFuture<PublishOutcome> publish(final InferenceRequest request) {
         requireNonNull(request);
-        final var record = new ProducerRecord<>(InferenceTopics.JOBS, request.jobId().value(), request);
-        return sendOffTheCallingThread(record)
+        return sendOffTheCallingThread(recordFor(request))
                 .completeOnTimeout(unavailable(), publishTimeout.toMillis(), TimeUnit.MILLISECONDS);
+    }
+
+    private ProducerRecord<String, InferenceRequest> recordFor(final InferenceRequest request) {
+        final var record = new ProducerRecord<>(InferenceTopics.JOBS, request.jobId().value(), request);
+        traceOrigin.traceparent().ifPresent(traceparent -> JobHeaders.putTraceparent(record.headers(), traceparent));
+        return record;
     }
 
     private CompletableFuture<PublishOutcome> sendOffTheCallingThread(final ProducerRecord<String, InferenceRequest> record) {

@@ -4,7 +4,9 @@ import dev.blumek.inference.domain.model.InferenceRequest;
 import dev.blumek.inference.domain.model.JobId;
 import dev.blumek.inference.domain.model.ModelId;
 import dev.blumek.inference.gateway.submission.PublishOutcome;
+import dev.blumek.inference.gateway.tracing.TraceOrigin;
 import dev.blumek.inference.messaging.InferenceTopics;
+import dev.blumek.inference.messaging.JobHeaders;
 import org.apache.kafka.clients.producer.ProducerRecord;
 import org.apache.kafka.clients.producer.RecordMetadata;
 import org.apache.kafka.common.KafkaException;
@@ -23,6 +25,7 @@ import org.springframework.kafka.support.SendResult;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Executor;
 import java.util.concurrent.RejectedExecutionException;
@@ -40,12 +43,15 @@ class KafkaJobPublisherTest {
     private static final Duration RETRY_AFTER = Duration.ofSeconds(5);
     private static final Duration PUBLISH_TIMEOUT = Duration.ofSeconds(40);
     private static final Executor ON_THE_CALLING_THREAD = Runnable::run;
+    private static final String TRACEPARENT = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01";
+    private static final TraceOrigin ON_A_TRACE = () -> Optional.of(TRACEPARENT);
+    private static final TraceOrigin OFF_ANY_TRACE = Optional::empty;
 
     @SuppressWarnings("unchecked")
     private final KafkaTemplate<String, InferenceRequest> template = mock(KafkaTemplate.class);
 
     private final KafkaJobPublisher publisher =
-            new KafkaJobPublisher(template, ON_THE_CALLING_THREAD, PUBLISH_TIMEOUT, RETRY_AFTER);
+            new KafkaJobPublisher(template, ON_A_TRACE, ON_THE_CALLING_THREAD, PUBLISH_TIMEOUT, RETRY_AFTER);
 
     @Test
     void keysEveryRecordByItsJobId() {
@@ -82,6 +88,26 @@ class KafkaJobPublisherTest {
         publisher.publish(request);
 
         assertThat(whenTheRecordIsCaptured().value()).isEqualTo(request);
+    }
+
+    @Test
+    void stampsTheRecordWithTheTraceTheSubmissionArrivedOn() {
+        givenTheBrokerAcknowledges();
+
+        publisher.publish(givenARequest());
+
+        assertThat(JobHeaders.traceparent(whenTheRecordIsCaptured().headers())).contains(TRACEPARENT);
+    }
+
+    @Test
+    void leavesTheRecordUnstampedWhenNothingHasStartedATrace() {
+        givenTheBrokerAcknowledges();
+        final var untraced =
+                new KafkaJobPublisher(template, OFF_ANY_TRACE, ON_THE_CALLING_THREAD, PUBLISH_TIMEOUT, RETRY_AFTER);
+
+        untraced.publish(givenARequest());
+
+        assertThat(JobHeaders.traceparent(whenTheRecordIsCaptured().headers())).isEmpty();
     }
 
     @Test
@@ -187,7 +213,7 @@ class KafkaJobPublisherTest {
     void handsTheBlockingSendToTheExecutorInsteadOfRunningItOnTheCaller() {
         givenTheBrokerAcknowledges();
         final var queued = new ArrayList<Runnable>();
-        final var offloading = new KafkaJobPublisher(template, queued::add, PUBLISH_TIMEOUT, RETRY_AFTER);
+        final var offloading = new KafkaJobPublisher(template, ON_A_TRACE, queued::add, PUBLISH_TIMEOUT, RETRY_AFTER);
 
         final var actualOutcome = offloading.publish(givenARequest());
 
@@ -200,7 +226,7 @@ class KafkaJobPublisherTest {
     void shedsTheSubmissionWhenNoSendThreadCanTakeIt() {
         final var saturated = givenAnExecutorThatRejectsEverything();
 
-        final var actualOutcome = new KafkaJobPublisher(template, saturated, PUBLISH_TIMEOUT, RETRY_AFTER)
+        final var actualOutcome = new KafkaJobPublisher(template, ON_A_TRACE, saturated, PUBLISH_TIMEOUT, RETRY_AFTER)
                 .publish(givenARequest());
 
         assertThat(actualOutcome).isCompletedWithValue(new PublishOutcome.Unavailable(RETRY_AFTER));
@@ -208,7 +234,7 @@ class KafkaJobPublisherTest {
 
     @Test
     void doesNotTouchTheProducerWhenItShedsTheSubmission() {
-        new KafkaJobPublisher(template, givenAnExecutorThatRejectsEverything(), PUBLISH_TIMEOUT, RETRY_AFTER)
+        new KafkaJobPublisher(template, ON_A_TRACE, givenAnExecutorThatRejectsEverything(), PUBLISH_TIMEOUT, RETRY_AFTER)
                 .publish(givenARequest());
 
         verifyNoInteractions(template);
@@ -217,7 +243,8 @@ class KafkaJobPublisherTest {
     @Test
     void asksTheCallerToRetryWhenTheSendNeverSettles() {
         when(template.send(any(ProducerRecord.class))).thenReturn(new CompletableFuture<>());
-        final var impatient = new KafkaJobPublisher(template, ON_THE_CALLING_THREAD, Duration.ofMillis(50), RETRY_AFTER);
+        final var impatient =
+                new KafkaJobPublisher(template, ON_A_TRACE, ON_THE_CALLING_THREAD, Duration.ofMillis(50), RETRY_AFTER);
 
         final var actualOutcome = impatient.publish(givenARequest());
 

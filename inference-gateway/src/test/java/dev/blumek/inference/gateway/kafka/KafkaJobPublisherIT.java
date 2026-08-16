@@ -7,6 +7,8 @@ import dev.blumek.inference.gateway.submission.JobPublisher;
 import dev.blumek.inference.gateway.submission.PublishOutcome;
 import dev.blumek.inference.messaging.InferenceSerdes;
 import dev.blumek.inference.messaging.InferenceTopics;
+import dev.blumek.inference.messaging.JobHeaders;
+import io.micrometer.tracing.Tracer;
 import org.apache.kafka.clients.admin.Admin;
 import org.apache.kafka.clients.admin.AdminClientConfig;
 import org.apache.kafka.clients.admin.NewTopic;
@@ -64,6 +66,9 @@ class KafkaJobPublisherIT {
     @Autowired
     private KafkaContainer kafka;
 
+    @Autowired
+    private Tracer tracer;
+
     @BeforeEach
     void givenTheJobsTopicExists() throws Exception {
         try (final var admin = Admin.create(Map.of(AdminClientConfig.BOOTSTRAP_SERVERS_CONFIG, kafka.getBootstrapServers()))) {
@@ -117,6 +122,42 @@ class KafkaJobPublisherIT {
                 .distinct()
                 .toList();
         assertThat(actualPartitions).hasSize(PARTITIONS);
+    }
+
+    @Test
+    void stampsThePublishedRecordWithTheTraceItWasPublishedOn() {
+        final var request = givenARequest(JobId.newId());
+
+        final var actualTraceId = whenPublishedOnAFreshTrace(request);
+
+        assertThat(whenTheTopicIsDrained())
+                .filteredOn(record -> record.key().equals(request.jobId().value()))
+                .singleElement()
+                .satisfies(record -> assertThat(JobHeaders.traceparent(record.headers()))
+                        .hasValueSatisfying(traceparent -> assertThat(traceparent)
+                                .startsWith("00-" + actualTraceId + "-")));
+    }
+
+    @Test
+    void leavesARecordPublishedOutsideAnyTraceUnstamped() {
+        final var request = givenARequest(JobId.newId());
+
+        publisher.publish(request).join();
+
+        assertThat(whenTheTopicIsDrained())
+                .filteredOn(record -> record.key().equals(request.jobId().value()))
+                .singleElement()
+                .satisfies(record -> assertThat(JobHeaders.traceparent(record.headers())).isEmpty());
+    }
+
+    private String whenPublishedOnAFreshTrace(final InferenceRequest request) {
+        final var span = tracer.startScopedSpan("submit a job");
+        try {
+            publisher.publish(request).join();
+            return span.context().traceId();
+        } finally {
+            span.end();
+        }
     }
 
     private List<ConsumerRecord<String, InferenceRequest>> whenTheTopicIsDrained() {

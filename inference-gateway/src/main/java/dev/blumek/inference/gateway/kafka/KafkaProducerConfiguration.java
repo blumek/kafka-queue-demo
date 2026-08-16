@@ -2,6 +2,7 @@ package dev.blumek.inference.gateway.kafka;
 
 import dev.blumek.inference.domain.model.InferenceRequest;
 import dev.blumek.inference.gateway.submission.JobPublisher;
+import dev.blumek.inference.gateway.tracing.TraceOrigin;
 import dev.blumek.inference.messaging.InferenceSerdes;
 import org.apache.kafka.clients.producer.ProducerConfig;
 import org.apache.kafka.common.serialization.StringSerializer;
@@ -76,7 +77,8 @@ class KafkaProducerConfiguration {
 
     @Bean
     JobPublisher jobPublisher(final KafkaTemplate<String, InferenceRequest> jobKafkaTemplate,
+                              final TraceOrigin traceOrigin,
                               final ExecutorService jobSendExecutor) {
-        return new KafkaJobPublisher(jobKafkaTemplate, jobSendExecutor, PUBLISH_TIMEOUT, RETRY_AFTER);
+        return new KafkaJobPublisher(jobKafkaTemplate, traceOrigin, jobSendExecutor, PUBLISH_TIMEOUT, RETRY_AFTER);
     }
 }

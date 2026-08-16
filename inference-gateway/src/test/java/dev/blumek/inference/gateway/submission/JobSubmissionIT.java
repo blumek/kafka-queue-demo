@@ -1,6 +1,7 @@
 package dev.blumek.inference.gateway.submission;
 
 import dev.blumek.inference.messaging.InferenceTopics;
+import dev.blumek.inference.messaging.JobHeaders;
 import org.apache.kafka.clients.admin.Admin;
 import org.apache.kafka.clients.admin.AdminClientConfig;
 import org.apache.kafka.clients.admin.NewTopic;
@@ -20,9 +21,11 @@ import org.springframework.test.web.servlet.client.RestTestClient;
 import org.testcontainers.kafka.KafkaContainer;
 import org.testcontainers.utility.DockerImageName;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ExecutionException;
+import java.util.stream.Stream;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -37,6 +40,8 @@ class JobSubmissionIT {
     private static final String IDLE_TIMEOUT_MS = "5000";
 
     private static final String KEY_SEPARATOR = "\t";
+    private static final String PRINT_KEY = "print.key=true";
+    private static final String PRINT_HEADERS = "print.headers=true";
 
     private static final String A_RETRIED_KEY = "8f14e45f-ceea-467a-9c1e-1b5c5a2d3e4f";
     private static final String A_STATUS_URL_KEY = "c9bf9e57-1685-4c89-bafb-ff5af830be8a";
@@ -110,6 +115,14 @@ class JobSubmissionIT {
     }
 
     @Test
+    void stampsTheRecordWithTheTraceTheSubmissionStarted() throws Exception {
+        final var response = whenAJobIsSubmitted();
+
+        assertThat(whenTheConsoleConsumerReadsTheHeadersOfTheRecordKeyedBy(response.jobId()))
+                .contains(JobHeaders.TRACEPARENT + ":00-");
+    }
+
+    @Test
     void answersARetryCarryingTheSameKeyWithTheJobIdItAlreadyIssued() {
         final var actualFirst = whenAJobIsSubmittedWithKey(A_RETRIED_KEY);
         final var actualRetry = whenAJobIsSubmittedWithKey(A_RETRIED_KEY);
@@ -169,7 +182,7 @@ class JobSubmissionIT {
     }
 
     private List<String> whenTheConsoleConsumerReadsRecordsKeyedBy(final String jobId) throws Exception {
-        final var drained = whenTheConsoleConsumerDrainsTheTopic();
+        final var drained = whenTheConsoleConsumerDrainsTheTopic(PRINT_KEY);
         return drained.lines()
                 .map(line -> line.split(KEY_SEPARATOR, 2))
                 .filter(parts -> parts.length == 2 && parts[0].equals(jobId))
@@ -177,13 +190,26 @@ class JobSubmissionIT {
                 .toList();
     }
 
-    private String whenTheConsoleConsumerDrainsTheTopic() throws Exception {
-        final var result = kafka.execInContainer(CONSOLE_CONSUMER,
+    private String whenTheConsoleConsumerReadsTheHeadersOfTheRecordKeyedBy(final String jobId) throws Exception {
+        final var drained = whenTheConsoleConsumerDrainsTheTopic(PRINT_HEADERS, PRINT_KEY);
+        final var headers = drained.lines()
+                .map(line -> line.split(KEY_SEPARATOR, 3))
+                .filter(parts -> parts.length == 3 && parts[1].equals(jobId))
+                .map(parts -> parts[0])
+                .toList();
+        assertThat(headers).hasSize(1);
+        return headers.getFirst();
+    }
+
+    private String whenTheConsoleConsumerDrainsTheTopic(final String... properties) throws Exception {
+        final var command = new ArrayList<>(List.of(CONSOLE_CONSUMER,
                 "--bootstrap-server", INTERNAL_BOOTSTRAP,
                 "--topic", InferenceTopics.JOBS,
                 "--from-beginning",
-                "--timeout-ms", IDLE_TIMEOUT_MS,
-                "--property", "print.key=true");
+                "--timeout-ms", IDLE_TIMEOUT_MS));
+        Stream.of(properties).forEach(property -> command.addAll(List.of("--property", property)));
+
+        final var result = kafka.execInContainer(command.toArray(String[]::new));
         assertThat(result.getStdout()).as("console consumer stderr: %s", result.getStderr()).isNotBlank();
         return result.getStdout();
     }
