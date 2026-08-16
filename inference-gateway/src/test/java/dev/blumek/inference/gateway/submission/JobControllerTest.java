@@ -25,6 +25,7 @@ class JobControllerTest {
     private static final String JOB_ID = "8b9f2a1c-0d3e-4f5a-9b6c-7d8e9f0a1b2c";
     private static final URI STATUS_URL = URI.create("/jobs/" + JOB_ID);
     private static final Duration RETRY_AFTER = Duration.ofSeconds(5);
+    private static final String KEY = "7d1f4a58-1c9e-4c2f-9a3b-2f6e5d4c3b2a";
     private static final String SUBMISSION = """
             {"model": "llama3:8b", "prompt": "why is the sky blue?", "maxTokens": 128}""";
 
@@ -61,9 +62,8 @@ class JobControllerTest {
 
         whenAJobIsSubmitted();
 
-        final var captor = ArgumentCaptor.forClass(SubmitJobRequest.class);
-        verify(submissions).submit(captor.capture());
-        assertThat(captor.getValue()).isEqualTo(new SubmitJobRequest("llama3:8b", "why is the sky blue?", 128));
+        assertThat(whenTheCommandIsCaptured())
+                .isEqualTo(new SubmissionCommand("llama3:8b", "why is the sky blue?", 128, null));
     }
 
     @Test
@@ -123,11 +123,35 @@ class JobControllerTest {
     }
 
     @Test
+    void handsTheIdempotencyKeyToTheServiceSoARetryFindsTheSameJob() {
+        givenTheSubmissionIs(new PublishOutcome.Accepted());
+
+        whenAJobIsSubmittedWithKey(KEY);
+
+        assertThat(whenTheCommandIsCaptured().idempotencyKey()).contains(KEY);
+    }
+
+    @Test
+    void tellsTheServiceThatASubmissionWithoutAKeyCarriedNone() {
+        givenTheSubmissionIs(new PublishOutcome.Accepted());
+
+        whenAJobIsSubmitted();
+
+        assertThat(whenTheCommandIsCaptured().idempotencyKey()).isEmpty();
+    }
+
+    @Test
     void doesNotAskTheServiceToPublishASubmissionItRefused() {
         whenAJobIsSubmittedWith("""
                 {"model": "Llama3:8B", "prompt": "why is the sky blue?", "maxTokens": 128}""");
 
         verifyNoInteractions(submissions);
+    }
+
+    private SubmissionCommand whenTheCommandIsCaptured() {
+        final var captor = ArgumentCaptor.forClass(SubmissionCommand.class);
+        verify(submissions).submit(captor.capture());
+        return captor.getValue();
     }
 
     private void givenTheSubmissionIs(final PublishOutcome outcome) {
@@ -144,6 +168,15 @@ class JobControllerTest {
                 .uri("/jobs")
                 .contentType(MediaType.APPLICATION_JSON)
                 .content(submission)
+                .exchange();
+    }
+
+    private MvcTestResult whenAJobIsSubmittedWithKey(final String idempotencyKey) {
+        return mvc.post()
+                .uri("/jobs")
+                .contentType(MediaType.APPLICATION_JSON)
+                .header("Idempotency-Key", idempotencyKey)
+                .content(SUBMISSION)
                 .exchange();
     }
 }

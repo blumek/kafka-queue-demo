@@ -55,6 +55,13 @@ class ApiExceptionHandler extends ResponseEntityExceptionHandler {
                         "The submission carried a value this service cannot accept."));
     }
 
+    @ExceptionHandler(MalformedIdempotencyKeyException.class)
+    ResponseEntity<ProblemDetail> handleMalformedIdempotencyKey() {
+        return ResponseEntity.badRequest()
+                .body(problem(HttpStatus.BAD_REQUEST, "Invalid submission",
+                        "The Idempotency-Key header must be a UUID."));
+    }
+
     @ExceptionHandler(PublisherUnavailableException.class)
     ResponseEntity<ProblemDetail> handlePublisherUnavailable(final PublisherUnavailableException exception) {
         return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE)

@@ -21,6 +21,7 @@ import static org.mockito.Mockito.when;
 class JobSubmissionServiceTest {
     private static final Instant NOW = Instant.parse("2026-08-15T10:15:30Z");
     private static final Duration RETRY_AFTER = Duration.ofSeconds(5);
+    private static final String KEY = "7d1f4a58-1c9e-4c2f-9a3b-2f6e5d4c3b2a";
 
     private final JobPublisher publisher = mock(JobPublisher.class);
 
@@ -28,10 +29,10 @@ class JobSubmissionServiceTest {
             new JobSubmissionService(publisher, new SubmitJobMapper(Clock.fixed(NOW, ZoneOffset.UTC)));
 
     @Test
-    void publishesTheMappedRequestRatherThanTheWireRecord() {
+    void publishesTheMappedRequestRatherThanTheCommandItWasGiven() {
         givenThePublisherAnswers(new PublishOutcome.Accepted());
 
-        service.submit(givenASubmission());
+        whenSubmitted();
 
         assertThat(whenThePublishedRequestIsCaptured())
                 .satisfies(request -> assertThat(request.model()).isEqualTo(new ModelId("llama3:8b")))
@@ -44,7 +45,7 @@ class JobSubmissionServiceTest {
     void reportsTheJobIdItMintedForTheSubmission() {
         givenThePublisherAnswers(new PublishOutcome.Accepted());
 
-        final var actualSubmission = service.submit(givenASubmission()).join();
+        final var actualSubmission = whenSubmitted().join();
 
         assertThat(actualSubmission.jobId()).isEqualTo(whenThePublishedRequestIsCaptured().jobId());
     }
@@ -53,7 +54,7 @@ class JobSubmissionServiceTest {
     void reportsTheOutcomeThePublisherReturned() {
         givenThePublisherAnswers(new PublishOutcome.Unavailable(RETRY_AFTER));
 
-        final var actualSubmission = service.submit(givenASubmission()).join();
+        final var actualSubmission = whenSubmitted().join();
 
         assertThat(actualSubmission.outcome()).isEqualTo(new PublishOutcome.Unavailable(RETRY_AFTER));
     }
@@ -62,24 +63,42 @@ class JobSubmissionServiceTest {
     void staysPendingWhileThePublisherHasNotAnswered() {
         when(publisher.publish(any())).thenReturn(new CompletableFuture<>());
 
-        final var actualSubmission = service.submit(givenASubmission());
+        final var actualSubmission = whenSubmitted();
 
         assertThat(actualSubmission).isNotDone();
     }
 
     @Test
-    void mintsADistinctJobIdForEverySubmission() {
+    void mintsADistinctJobIdForEverySubmissionThatCarriesNoKey() {
         givenThePublisherAnswers(new PublishOutcome.Accepted());
 
-        final var actualFirst = service.submit(givenASubmission()).join();
-        final var actualSecond = service.submit(givenASubmission()).join();
+        final var actualFirst = whenSubmitted().join();
+        final var actualSecond = whenSubmitted().join();
 
         assertThat(actualFirst.jobId()).isNotEqualTo(actualSecond.jobId());
     }
 
     @Test
+    void reportsTheSameJobIdWhenARetryCarriesTheSameKey() {
+        givenThePublisherAnswers(new PublishOutcome.Accepted());
+
+        final var actualFirst = whenSubmittedWithKey(KEY).join();
+        final var actualSecond = whenSubmittedWithKey(KEY).join();
+
+        assertThat(actualFirst.jobId()).isEqualTo(actualSecond.jobId());
+    }
+
+    @Test
     void rejectsANullSubmission() {
         assertThatNullPointerException().isThrownBy(() -> service.submit(null));
+    }
+
+    private CompletableFuture<Submission> whenSubmitted() {
+        return service.submit(givenASubmission());
+    }
+
+    private CompletableFuture<Submission> whenSubmittedWithKey(final String idempotencyKey) {
+        return service.submit(new SubmissionCommand("llama3:8b", "why is the sky blue?", 128, idempotencyKey));
     }
 
     private void givenThePublisherAnswers(final PublishOutcome outcome) {
@@ -92,7 +111,7 @@ class JobSubmissionServiceTest {
         return captor.getValue();
     }
 
-    private static SubmitJobRequest givenASubmission() {
-        return new SubmitJobRequest("llama3:8b", "why is the sky blue?", 128);
+    private static SubmissionCommand givenASubmission() {
+        return new SubmissionCommand("llama3:8b", "why is the sky blue?", 128, null);
     }
 }

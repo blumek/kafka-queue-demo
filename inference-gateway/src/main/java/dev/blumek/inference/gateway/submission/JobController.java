@@ -5,6 +5,7 @@ import jakarta.validation.Valid;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.util.UriComponentsBuilder;
@@ -22,8 +23,14 @@ class JobController {
     }
 
     @PostMapping
-    CompletableFuture<ResponseEntity<JobAcceptedResponse>> submit(@Valid @RequestBody final SubmitJobRequest request) {
-        return submissions.submit(request).thenApply(JobController::respondTo);
+    CompletableFuture<ResponseEntity<JobAcceptedResponse>> submit(
+            @Valid @RequestBody final SubmitJobRequest request,
+            @RequestHeader(name = "Idempotency-Key", required = false) final String idempotencyKey) {
+        return submissions.submit(commandFor(request, idempotencyKey)).thenApply(JobController::respondTo);
+    }
+
+    private static SubmissionCommand commandFor(final SubmitJobRequest request, final String idempotencyKey) {
+        return new SubmissionCommand(request.model(), request.prompt(), request.maxTokens(), idempotencyKey);
     }
 
     private static ResponseEntity<JobAcceptedResponse> respondTo(final Submission submission) {

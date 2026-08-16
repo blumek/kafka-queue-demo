@@ -11,8 +11,8 @@ class JobSubmissionService {
         this.mapper = mapper;
     }
 
-    CompletableFuture<Submission> submit(final SubmitJobRequest request) {
-        final var job = mapper.toInferenceRequest(request);
+    CompletableFuture<Submission> submit(final SubmissionCommand command) {
+        final var job = mapper.toInferenceRequest(command);
         return publisher
                 .publish(job)
                 .thenApply(outcome -> new Submission(job.jobId(), outcome));

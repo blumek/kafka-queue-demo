@@ -38,6 +38,12 @@ class JobSubmissionIT {
 
     private static final String KEY_SEPARATOR = "\t";
 
+    private static final String A_RETRIED_KEY = "8f14e45f-ceea-467a-9c1e-1b5c5a2d3e4f";
+    private static final String A_STATUS_URL_KEY = "c9bf9e57-1685-4c89-bafb-ff5af830be8a";
+    private static final String ONE_KEY = "6ea2f0d8-6b4a-4f0e-9a3d-7c8b9e0a1b2c";
+    private static final String ANOTHER_KEY = "2d1a3b4c-5e6f-4071-8293-a4b5c6d7e8f9";
+    private static final String A_TOPIC_KEY = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
+
     @TestConfiguration(proxyBeanMethods = false)
     static class Containers {
         @Bean
@@ -103,10 +109,50 @@ class JobSubmissionIT {
         assertThat(whenTheConsoleConsumerReadsTheRecordKeyedBy(response.jobId())).isNotBlank();
     }
 
+    @Test
+    void answersARetryCarryingTheSameKeyWithTheJobIdItAlreadyIssued() {
+        final var actualFirst = whenAJobIsSubmittedWithKey(A_RETRIED_KEY);
+        final var actualRetry = whenAJobIsSubmittedWithKey(A_RETRIED_KEY);
+
+        assertThat(actualRetry.jobId()).isEqualTo(actualFirst.jobId()).isEqualTo(A_RETRIED_KEY);
+    }
+
+    @Test
+    void pointsARetryAtTheStatusUrlOfTheJobItAlreadyStarted() {
+        final var actualFirst = whenAJobIsSubmittedWithKey(A_STATUS_URL_KEY);
+        final var actualRetry = whenAJobIsSubmittedWithKey(A_STATUS_URL_KEY);
+
+        assertThat(actualRetry.statusUrl()).isEqualTo(actualFirst.statusUrl());
+    }
+
+    @Test
+    void issuesADistinctJobForEachDistinctKey() {
+        final var actualFirst = whenAJobIsSubmittedWithKey(ONE_KEY);
+        final var actualSecond = whenAJobIsSubmittedWithKey(ANOTHER_KEY);
+
+        assertThat(actualFirst.jobId()).isNotEqualTo(actualSecond.jobId());
+    }
+
+    @Test
+    void keepsARetryOnTheOneJobIdRatherThanOpeningASecondJobOnTheTopic() throws Exception {
+        final var actualFirst = whenAJobIsSubmittedWithKey(A_TOPIC_KEY);
+        final var actualRetry = whenAJobIsSubmittedWithKey(A_TOPIC_KEY);
+
+        assertThat(whenTheConsoleConsumerReadsRecordsKeyedBy(actualFirst.jobId()))
+                .hasSize(2)
+                .allSatisfy(value -> assertThat(value).contains("\"jobId\":\"" + actualRetry.jobId() + "\""));
+    }
+
     private JobAcceptedResponse whenAJobIsSubmitted() {
-        return client.post()
-                .uri("/jobs")
-                .contentType(MediaType.APPLICATION_JSON)
+        return whenSubmitting(client.post().uri("/jobs"));
+    }
+
+    private JobAcceptedResponse whenAJobIsSubmittedWithKey(final String idempotencyKey) {
+        return whenSubmitting(client.post().uri("/jobs").header("Idempotency-Key", idempotencyKey));
+    }
+
+    private JobAcceptedResponse whenSubmitting(final RestTestClient.RequestBodySpec request) {
+        return request.contentType(MediaType.APPLICATION_JSON)
                 .body(new SubmitJobRequest("llama3:8b", "why is the sky blue?", 128))
                 .exchange()
                 .expectStatus().isAccepted()
@@ -117,14 +163,18 @@ class JobSubmissionIT {
     }
 
     private String whenTheConsoleConsumerReadsTheRecordKeyedBy(final String jobId) throws Exception {
+        final var values = whenTheConsoleConsumerReadsRecordsKeyedBy(jobId);
+        assertThat(values).hasSize(1);
+        return values.getFirst();
+    }
+
+    private List<String> whenTheConsoleConsumerReadsRecordsKeyedBy(final String jobId) throws Exception {
         final var drained = whenTheConsoleConsumerDrainsTheTopic();
-        final var values = drained.lines()
+        return drained.lines()
                 .map(line -> line.split(KEY_SEPARATOR, 2))
                 .filter(parts -> parts.length == 2 && parts[0].equals(jobId))
                 .map(parts -> parts[1])
                 .toList();
-        assertThat(values).as("console consumer output: %s", drained).hasSize(1);
-        return values.getFirst();
     }
 
     private String whenTheConsoleConsumerDrainsTheTopic() throws Exception {
