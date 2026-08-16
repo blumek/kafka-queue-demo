@@ -4,6 +4,7 @@ import dev.blumek.inference.domain.model.InferenceRequest;
 import dev.blumek.inference.domain.model.JobId;
 import dev.blumek.inference.domain.model.ModelId;
 import dev.blumek.inference.messaging.InferenceTopics;
+import dev.blumek.inference.worker.processing.Disposition;
 import org.apache.kafka.common.TopicPartition;
 import org.junit.jupiter.api.Test;
 
@@ -26,6 +27,7 @@ class InFlightRegistryTest {
     private static final int MAX_RENEWALS = 3;
     private static final int FIRST_DELIVERY = 1;
     private static final int WORKER_THREADS = 4;
+    private static final Disposition ACCEPTED = new Disposition.Accept();
 
     private final MutableClock clock = new MutableClock(DISPATCHED_AT);
     private final InFlightRegistry registry = new InFlightRegistry(clock, POLL_LIMIT, MAX_RENEWALS);
@@ -58,7 +60,7 @@ class InFlightRegistryTest {
 
         whenCompleted(inFlight);
 
-        assertThat(registry.drainCompleted()).containsExactly(new Completion(inFlight.ref(), Disposition.ACCEPT));
+        assertThat(registry.drainCompleted()).containsExactly(new Completion(inFlight.ref(), ACCEPTED));
     }
 
     @Test
@@ -81,11 +83,85 @@ class InFlightRegistryTest {
 
     @Test
     void rejectsACompletionForARecordItIsNotTracking() {
-        registry.complete(new Completion(givenRef(0, 0L), Disposition.ACCEPT));
+        registry.complete(new Completion(givenRef(0, 0L), ACCEPTED));
 
         assertThatThrownBy(registry::drainCompleted)
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining("untracked");
+    }
+
+    @Test
+    void handsBackTheEntryOfARecordItIsTracking() {
+        final var inFlight = givenAcquired(0, 0L);
+        registry.track(inFlight);
+
+        assertThat(registry.tracking(inFlight.ref())).contains(inFlight);
+    }
+
+    @Test
+    void tracksNothingForARecordItHasNeverSeen() {
+        assertThat(registry.tracking(givenRef(0, 0L))).isEmpty();
+    }
+
+    @Test
+    void forgetsARecordWhoseLockWasGivenUp() {
+        final var inFlight = givenAcquired(0, 0L);
+        registry.track(inFlight);
+
+        registry.abandon(inFlight.ref());
+
+        assertThat(registry.size()).isZero();
+    }
+
+    @Test
+    void discardsTheLateCompletionOfARecordWhoseLockWasGivenUp() {
+        final var inFlight = givenAcquired(0, 0L);
+        registry.track(inFlight);
+        registry.abandon(inFlight.ref());
+
+        whenCompleted(inFlight);
+
+        assertThat(registry.drainCompleted()).isEmpty();
+    }
+
+    @Test
+    void stillRejectsASecondCompletionOfAnAbandonedRecord() {
+        final var inFlight = givenAcquired(0, 0L);
+        registry.track(inFlight);
+        registry.abandon(inFlight.ref());
+        whenCompleted(inFlight);
+        registry.drainCompleted();
+
+        whenCompleted(inFlight);
+
+        assertThatThrownBy(registry::drainCompleted).isInstanceOf(IllegalStateException.class);
+    }
+
+    @Test
+    void wakesTheLoopAsSoonAsAWorkerFinishes() throws Exception {
+        final var inFlight = givenAcquired(0, 0L);
+        registry.track(inFlight);
+        givenCompletedAfter(inFlight, Duration.ofMillis(20));
+
+        assertThat(registry.awaitCompleted(Duration.ofSeconds(5))).hasSize(1);
+    }
+
+    @Test
+    void waitsNoLongerThanAskedWhenNoWorkerFinishes() {
+        registry.track(givenAcquired(0, 0L));
+
+        assertThat(registry.awaitCompleted(Duration.ofMillis(20))).isEmpty();
+    }
+
+    private void givenCompletedAfter(final InFlight inFlight, final Duration delay) {
+        Thread.ofVirtual().start(() -> {
+            try {
+                Thread.sleep(delay);
+                whenCompleted(inFlight);
+            } catch (final InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+            }
+        });
     }
 
     @Test
@@ -250,7 +326,7 @@ class InFlightRegistryTest {
     }
 
     private void whenCompleted(final InFlight inFlight) {
-        registry.complete(new Completion(inFlight.ref(), Disposition.ACCEPT));
+        registry.complete(new Completion(inFlight.ref(), ACCEPTED));
     }
 
     private void whenRenewed(final List<InFlight> due) {

@@ -9,17 +9,21 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
-import java.util.Queue;
-import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.Set;
+import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.TimeUnit;
 
 public final class InFlightRegistry {
     private static final Logger LOG = LoggerFactory.getLogger(InFlightRegistry.class);
 
     private final Map<RecordRef, InFlight> entries = new HashMap<>();
-    private final Queue<Completion> completions = new ConcurrentLinkedQueue<>();
+    private final Set<RecordRef> abandoned = new HashSet<>();
+    private final BlockingQueue<Completion> completions = new LinkedBlockingQueue<>();
     private final Clock clock;
     private final int maxInFlight;
     private final int maxRenewals;
@@ -50,23 +54,56 @@ public final class InFlightRegistry {
         }
     }
 
+    public Optional<InFlight> tracking(final RecordRef ref) {
+        return Optional.ofNullable(entries.get(ref));
+    }
+
+    public void abandon(final RecordRef ref) {
+        if (entries.remove(ref) != null) {
+            abandoned.add(ref);
+        }
+    }
+
     public void complete(final Completion completion) {
         completions.add(completion);
     }
 
     public List<Completion> drainCompleted() {
-        final var drained = new ArrayList<Completion>();
-        for (var completion = completions.poll(); completion != null; completion = completions.poll()) {
-            forget(completion.ref());
-            drained.add(completion);
-        }
-        return List.copyOf(drained);
+        return awaitCompleted(Duration.ZERO);
     }
 
-    private void forget(final RecordRef ref) {
-        if (entries.remove(ref) == null) {
-            throw new IllegalStateException("Completion for untracked record " + ref);
+    public List<Completion> awaitCompleted(final Duration timeout) {
+        final var drained = new ArrayList<Completion>();
+        final var first = awaitFirstCompletion(timeout);
+        first.ifPresent(drained::add);
+        completions.drainTo(drained);
+        return forgetAll(drained);
+    }
+
+    private Optional<Completion> awaitFirstCompletion(final Duration timeout) {
+        try {
+            return Optional.ofNullable(completions.poll(timeout.toMillis(), TimeUnit.MILLISECONDS));
+        } catch (final InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+            return Optional.empty();
         }
+    }
+
+    private List<Completion> forgetAll(final List<Completion> drained) {
+        return drained.stream()
+                .filter(completion -> forget(completion.ref()))
+                .toList();
+    }
+
+    private boolean forget(final RecordRef ref) {
+        if (entries.remove(ref) != null) {
+            return true;
+        }
+        if (abandoned.remove(ref)) {
+            LOG.debug("Discarding the completion of {} because its lock was already given up", ref);
+            return false;
+        }
+        throw new IllegalStateException("Completion for untracked record " + ref);
     }
 
     public List<InFlight> needingRenewal(final Duration lockTimeout) {
@@ -79,10 +116,11 @@ public final class InFlightRegistry {
     }
 
     public List<InFlight> abandonAll() {
-        final var abandoned = List.copyOf(entries.values());
+        final var abandonedEntries = List.copyOf(entries.values());
         entries.clear();
+        abandoned.clear();
         completions.clear();
-        return abandoned;
+        return abandonedEntries;
     }
 
     public int size() {

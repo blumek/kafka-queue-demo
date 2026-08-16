@@ -1,5 +1,7 @@
 package dev.blumek.inference.worker.inflight;
 
+import dev.blumek.inference.worker.processing.Disposition;
+
 import static java.util.Objects.requireNonNull;
 
 public record Completion(RecordRef ref, Disposition disposition) {
